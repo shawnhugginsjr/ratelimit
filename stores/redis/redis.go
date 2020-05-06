@@ -26,7 +26,7 @@ type Client interface {
 type Store struct {
 	Prefix     string // Prefix used for the key.
 	RetryLimit int    // RetryLimit is the maximum number of retry under race conditions.
-	client     Client // client used to communicate with redis server.
+	Client     Client // client used to communicate with redis server.
 }
 
 func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimit.Rate) (ratelimit.LimitRecord, error) {
@@ -59,7 +59,7 @@ func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimi
 		return nil
 	}
 
-	err := store.client.Watch(onWatch, key)
+	err := store.Client.Watch(onWatch, key)
 	if err != nil {
 		err = errors.Wrapf(err, "ratelimit: cannot get value for %s", key)
 		return ratelimit.LimitRecord{}, err
