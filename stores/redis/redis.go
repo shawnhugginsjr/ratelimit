@@ -29,9 +29,10 @@ type Store struct {
 	Client     Client // client used to communicate with redis server.
 }
 
+// RecordRequest will increment the visit count for a specific ID.
 func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimit.Rate) (ratelimit.LimitRecord, error) {
 	key = fmt.Sprintf("%s:%s", store.Prefix, key)
-	var lctx ratelimit.LimitRecord
+	var lr ratelimit.LimitRecord
 	onWatch := func(tx *redisClient.Tx) error {
 		created, err := store.trySetNX(tx, key, rate.Period)
 		if err != nil {
@@ -40,7 +41,7 @@ func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimi
 
 		if created {
 			expiration := time.Now().Add(rate.Period)
-			lctx = ratelimit.NewLimitRecord(rate, expiration, 1)
+			lr = ratelimit.NewLimitRecord(rate, expiration, 1)
 			return nil
 		}
 
@@ -55,7 +56,7 @@ func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimi
 			expiration = now.Add(ttl)
 		}
 
-		lctx = ratelimit.NewLimitRecord(rate, expiration, count)
+		lr = ratelimit.NewLimitRecord(rate, expiration, count)
 		return nil
 	}
 
@@ -65,10 +66,12 @@ func (store *Store) RecordRequest(ctx context.Context, key string, rate ratelimi
 		return ratelimit.LimitRecord{}, err
 	}
 
-	return lctx, nil
+	return lr, nil
 }
 
-// trySetNX will execute setValue with a retry mecanism (optimistic locking) until store.RetryLimit is reached.
+// trySetNX will attempt to execute setNX once within a retry limit. There is a race condition
+// where multiple requests try to update the visit count at the same time, so optimistic locking
+// is used to resolve the issue.
 func (store *Store) trySetNX(tx *redisClient.Tx, key string, expiration time.Duration) (bool, error) {
 	for i := 0; i < store.RetryLimit; i++ {
 		created, err := setNX(tx, key, expiration)
@@ -79,7 +82,7 @@ func (store *Store) trySetNX(tx *redisClient.Tx, key string, expiration time.Dur
 	return false, errors.New("retry limit exceeded")
 }
 
-// setNX will init a counter if the key doesn't.
+// setNX will init a counter if the key does not exist.
 func setNX(tx *redisClient.Tx, key string, expiration time.Duration) (bool, error) {
 	value := tx.SetNX(key, 1, expiration)
 
@@ -91,7 +94,9 @@ func setNX(tx *redisClient.Tx, key string, expiration time.Duration) (bool, erro
 	return created, nil
 }
 
-// tryIncrementValue will execute setValue with a retry mechanism (optimistic locking) until store.RetryLimit is reached.
+// tryIncrementValue will attempt to execute incrementValue once within a retry limit. There is a race
+// condition where multiple requests try to update the visit count at the same time, so optimistic locking
+// is used to resolve the issue.
 func (store *Store) tryIncrementValue(tx *redisClient.Tx, key string,
 	expiration time.Duration) (int64, time.Duration, error) {
 	for i := 0; i < store.RetryLimit; i++ {
@@ -108,7 +113,7 @@ func (store *Store) tryIncrementValue(tx *redisClient.Tx, key string,
 	return 0, 0, errors.New("retry limit exceeded")
 }
 
-// incrementValue will try to increment the counter identified by given key.
+// incrementValue will increment the counter identified by given key.
 func incrementValue(tx *redisClient.Tx, key string, expiration time.Duration) (int64, time.Duration, error) {
 	pipe := tx.TxPipeline()
 	value := pipe.Incr(key)
