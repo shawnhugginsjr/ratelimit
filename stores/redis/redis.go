@@ -134,7 +134,6 @@ func incrementValue(tx *redisClient.Tx, key string, expiration time.Duration) (i
 		return 0, 0, err
 	}
 
-	// If keyTTL is less than zero, we have to define key expiration.
 	// The PTTL command returns -2 if the key does not exist, and -1 if the key exists, but there is no expiry set.
 	// We shouldn't try to set an expiry on a key that doesn't exist.
 	if isExpirationRequired(keyTTL) {
@@ -160,4 +159,71 @@ func isExpirationRequired(ttl time.Duration) bool {
 	default:
 		return false
 	}
+}
+
+// CheckLimit returns the limit for a given identifier without chaning the count.
+func (store *Store) CheckLimit(ctx context.Context, key string, rate ratelimit.Rate) (ratelimit.LimitRecord, error) {
+	key = fmt.Sprintf("%s:%s", store.Prefix, key)
+
+	lr := ratelimit.LimitRecord{}
+	onWatch := func(tx *redisClient.Tx) error {
+		count, ttl, err := store.tryCheckLimit(tx, key)
+		if err != nil {
+			return errors.Wrap(err, "store: tryCheckValue failed")
+		}
+
+		now := time.Now()
+		expiration := now.Add(rate.Period)
+		if ttl > 0 {
+			expiration = now.Add(ttl)
+		}
+
+		lr = ratelimit.NewLimitRecord(rate, expiration, count)
+		return nil
+	}
+
+	err := store.Client.Watch(onWatch, key)
+	if err != nil {
+		err = errors.Wrapf(err, "redis-store: cannot check limit for %s", key)
+		return lr, err
+	}
+
+	return lr, nil
+}
+
+// tryCheckLimit will attempt to execute checkLimit once within a retry limit. There is a race
+// condition where multiple requests try to update the visit count at the same time, so optimistic locking
+// is used to resolve the issue.
+func (store *Store) tryCheckLimit(tx *redisClient.Tx, key string) (int64, time.Duration, error) {
+	for i := 0; i < store.RetryLimit; i++ {
+		count, ttl, err := checkLimit(tx, key)
+		if err == nil {
+			return count, ttl, nil
+		}
+	}
+	return 0, 0, errors.New("redis-store: retry limit exceeded")
+}
+
+// checkLimit will retrieve the counter and its expiration for given key.
+func checkLimit(tx *redisClient.Tx, key string) (int64, time.Duration, error) {
+	pipe := tx.TxPipeline()
+	value := pipe.Get(key)
+	expire := pipe.PTTL(key)
+
+	_, err := pipe.Exec()
+	if err != nil && err != redisClient.Nil {
+		return 0, 0, errors.Wrapf(err, "redis-store: pipelined commands failed for key %s", key)
+	}
+
+	count, err := value.Int64()
+	if err != nil && err != redisClient.Nil {
+		return 0, 0, errors.Wrapf(err, "redis-store: count could not be retrieved for key %s", key)
+	}
+
+	ttl, err := expire.Result()
+	if err != nil {
+		return 0, 0, errors.Wrapf(err, "redis-store: count ttl could not be retrieved for key %s", key)
+	}
+
+	return count, ttl, nil
 }
