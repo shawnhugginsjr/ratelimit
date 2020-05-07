@@ -1,0 +1,3 @@
+# Rate Limit (WIP)
+
+A HTTP request limiter supported by Redis.
